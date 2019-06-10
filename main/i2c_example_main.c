@@ -4,6 +4,7 @@
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "driver/gpio.h"
 
@@ -11,6 +12,19 @@
 #include "unistd.h"
 
 #include <inttypes.h> // for PRIi8
+
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+
+#include "lwip/err.h"
+#include "lwip/sys.h"
+
+#include "mqtt_client.h"
+
+#define STA_WIFI_SSID "MEDS IoT"
+#define STA_WIFI_PASS "Medsiot12!"
+#define STA_MAXIMUM_RETRY 5
 
 #define I2C_MASTER_SCL_IO 22               /*!< gpio number for I2C master clock */
 #define I2C_MASTER_SDA_IO 21               /*!< gpio number for I2C master data  */
@@ -34,6 +48,17 @@ void user_delay_ms(uint32_t period);
 void get_sensor_readings();
 
 static const char* TAG = "i2c_bme680";
+
+/* FreeRTOS event group to signal when we are connected*/
+static EventGroupHandle_t s_wifi_event_group;
+/* The event group allows multiple bits for each event, but we only care about one event
+ * - are we connected to the AP with an IP? */
+const int WIFI_CONNECTED_BIT = BIT0;
+static const char *wifiTAG = "wifi station";
+static int s_retry_num = 0;
+
+esp_mqtt_client_handle_t client;
+static bool mqttReadyflag = false;
 
 void bme680_sensor_init()
 {
@@ -88,6 +113,8 @@ void bme680_sensor_init()
 void get_sensor_readings()
 {
     int8_t rslt = BME680_OK;
+	char package[350];
+    int msg_id;
 
     /* Get the total measurement duration so as to sleep or wait till the
      * measurement is complete */
@@ -104,10 +131,37 @@ void get_sensor_readings()
 
         printf("T: %.2f degC, P: %.2f hPa, H %.2f %%rH ", data.temperature / 100.0f,
             data.pressure / 100.0f, data.humidity / 1000.0f );
+
+        sprintf(package, "{\"1\":{\"command\":\"property.publish\",\"params\":{"
+        	                "\"thingKey\":\"%s\","
+        	                "\"key\": \"%s\","
+        	                "\"value\": \"%.2f\""
+        	                "}}", "beaglebone_test", "temperature" , data.temperature / 100.0f);
+
+        sprintf(package + strlen(package), ",\"2\":{\"command\":\"property.publish\",\"params\":{"
+							"\"thingKey\":\"%s\","
+							"\"key\": \"%s\","
+							"\"value\": \"%.2f\""
+							"}}", "beaglebone_test", "pressure" , data.pressure / 100.0f);
+
+        sprintf(package + strlen(package), ",\"3\":{\"command\":\"property.publish\",\"params\":{"
+							"\"thingKey\":\"%s\","
+							"\"key\": \"%s\","
+							"\"value\": \"%.2f\""
+							"}}}", "beaglebone_test", "humidity" , data.humidity / 1000.0f);
+        printf("String Length: %d", strlen(package));
+
+//        printf("%s", package);
+
         /* Avoid using measurements from an unstable heating setup */
         if(data.status & BME680_GASM_VALID_MSK)
             printf(", G: %d OHMS", data.gas_resistance);
 
+        if(mqttReadyflag){
+			msg_id = esp_mqtt_client_publish(client, "api", package, strlen(package), 0, 0);
+			printf("\n");
+			ESP_LOGI("MQTT", "Sent publish successful, msg_id=%d", msg_id);
+        }
         printf("\r\n");
 
         /* Trigger the next measurement if you would like to read data out continuously */
@@ -265,10 +319,132 @@ static esp_err_t i2c_master_init()
                               I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
+static void event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < STA_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+            s_retry_num++;
+            ESP_LOGI(wifiTAG, "retry to connect to the AP");
+        }
+        ESP_LOGI(wifiTAG,"connect to the AP fail");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(wifiTAG, "got ip:%s",
+                 ip4addr_ntoa(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+void wifi_init_sta()
+{
+    s_wifi_event_group = xEventGroupCreate();
+
+    tcpip_adapter_init();
+
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = STA_WIFI_SSID,
+            .password = STA_WIFI_PASS
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_start() );
+
+    ESP_LOGI(wifiTAG, "wifi_init_sta finished.");
+    ESP_LOGI(wifiTAG, "connect to ap SSID:%s password:%s",
+    		STA_WIFI_SSID, STA_WIFI_PASS);
+}
+
+static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
+{
+    client = event->client;
+    const char *mqttTAG = "MQTT";
+    int msg_id;
+    // your_context_t *context = event->context;
+    switch (event->event_id) {
+        case MQTT_EVENT_CONNECTED:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_CONNECTED");
+            mqttReadyflag = true;
+            msg_id = esp_mqtt_client_subscribe(client, "reply", 0);
+            ESP_LOGI(mqttTAG, "sent subscribe successful, msg_id=%d", msg_id);
+            break;
+        case MQTT_EVENT_DISCONNECTED:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_DISCONNECTED");
+            mqttReadyflag = false;
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_UNSUBSCRIBED:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_DATA:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_DATA");
+            printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+            printf("DATA=%.*s\r\n", event->data_len, event->data);
+            break;
+        case MQTT_EVENT_ERROR:
+            ESP_LOGI(mqttTAG, "MQTT_EVENT_ERROR");
+            break;
+        default:
+            ESP_LOGI(mqttTAG, "Other event id:%d", event->event_id);
+            break;
+    }
+    return ESP_OK;
+}
+
+static void mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .uri = "mqtt://api-dev.devicewise.com/api",
+        .event_handle = mqtt_event_handler,
+        .username = "waiyar.aung@meds-tech.com",
+        .password = "Meds_training1",
+        // .user_context = (void *)your_context
+    };
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_start(client);
+}
 
 void app_main()
 {
 	printf("Main started\n");
+
+    esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+	  ESP_ERROR_CHECK(nvs_flash_erase());
+	  ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+
+	ESP_LOGI(wifiTAG, "ESP_WIFI_MODE_STA");
+	wifi_init_sta();
+
+    mqtt_app_start();
+
     ESP_ERROR_CHECK(i2c_master_init());
 
     bme680_sensor_init();

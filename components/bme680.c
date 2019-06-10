@@ -49,6 +49,8 @@
  @brief Sensor driver for BME680 sensor */
 #include "bme680.h"
 #include <stdio.h>
+#include <inttypes.h> // for PRIi8
+
 
 /*!
  * @brief This internal API is used to read the calibrated data from the sensor.
@@ -302,9 +304,6 @@ int8_t bme680_init(struct bme680_dev *dev)
 					rslt = get_calib_data(dev);
 				} else {
 					rslt = BME680_E_DEV_NOT_FOUND;
-					rslt = get_calib_data(dev);
-					dev->chip_id = 0x61;
-					printf("%x", dev->chip_id);
 				}
 			}
 		}

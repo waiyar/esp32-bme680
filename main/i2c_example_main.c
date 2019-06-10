@@ -27,13 +27,13 @@
 
 SemaphoreHandle_t print_mux = NULL;
 
-struct bme680_dev gas_sensor;
+static struct bme680_dev gas_sensor;
 int8_t user_i2c_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len);
 int8_t user_i2c_write(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len);
 void user_delay_ms(uint32_t period);
 void get_sensor_readings();
 
- static const char* TAG = "i2c_bme680";
+static const char* TAG = "i2c_bme680";
 
 void bme680_sensor_init()
 {
@@ -50,9 +50,6 @@ void bme680_sensor_init()
 	* or by performing a few temperature readings without operating the gas sensor.
 	*/
 	gas_sensor.amb_temp = 25;
-
-	rslt = bme680_init(&gas_sensor);
-	printf("\nInitialized with code: %" PRIi8 , rslt);
 
     /* Set the temperature, pressure and humidity settings */
 	gas_sensor.tph_sett.os_hum = BME680_OS_2X;
@@ -73,7 +70,9 @@ void bme680_sensor_init()
 	/* Set the required sensor settings needed */
 	set_required_settings = BME680_OST_SEL | BME680_OSP_SEL | BME680_OSH_SEL | BME680_FILTER_SEL
 		| BME680_GAS_SENSOR_SEL;
-    printf("\nBefore settings with code: %" PRIi8 , rslt);
+
+    rslt = bme680_init(&gas_sensor);
+    printf("\nInitialized with code: %" PRIi8 , rslt);
 
 	/* Set the desired sensor configuration */
 	rslt = bme680_set_sensor_settings(set_required_settings,&gas_sensor);
@@ -154,7 +153,6 @@ int8_t user_i2c_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16
      */
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
 
-    cmd = i2c_cmd_link_create();
 	i2c_master_start(cmd);
 	i2c_master_write_byte(cmd, (dev_id << 1) | WRITE_BIT, ACK_CHECK_EN);
 	i2c_master_write_byte(cmd, reg_addr, ACK_CHECK_EN);
@@ -167,7 +165,9 @@ int8_t user_i2c_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16
     cmd = i2c_cmd_link_create();
 	i2c_master_start(cmd);
 	i2c_master_write_byte(cmd, (dev_id << 1) | READ_BIT, ACK_CHECK_EN);
-	i2c_master_read(cmd, reg_data, len, ACK_VAL);
+	if(len > 1){
+		i2c_master_read(cmd, reg_data, len - 1, ACK_VAL);
+	}
 	i2c_master_read_byte(cmd, reg_data + len - 1, NACK_VAL);
 	i2c_master_stop(cmd);
 	ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000 / portTICK_RATE_MS);

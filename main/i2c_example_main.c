@@ -39,6 +39,10 @@
 #define ACK_VAL 0x0                             /*!< I2C ack value */
 #define NACK_VAL 0x1                            /*!< I2C nack value */
 
+#define THING_KEY "bme-680-new"
+#define APP_TOKEN "JBvP2WHrK8YoM9zM"
+#define APP_ID "5d3ea5aa14c978220629cb9d"
+
 SemaphoreHandle_t print_mux = NULL;
 
 static struct bme680_dev gas_sensor;
@@ -128,6 +132,10 @@ void get_sensor_readings()
         user_delay_ms(meas_period); /* Delay till the measurement is ready */
 
         rslt = bme680_get_sensor_data(&data, &gas_sensor);
+        if(rslt != 0 ){
+        	printf("Error reading data");
+        	return;
+        }
 
         printf("T: %.2f degC, P: %.2f hPa, H %.2f %%rH ", data.temperature / 100.0f,
             data.pressure / 100.0f, data.humidity / 1000.0f );
@@ -136,19 +144,19 @@ void get_sensor_readings()
         	                "\"thingKey\":\"%s\","
         	                "\"key\": \"%s\","
         	                "\"value\": \"%.2f\""
-        	                "}}", "beaglebone_test", "temperature" , data.temperature / 100.0f);
+        	                "}}", THING_KEY, "temperature" , data.temperature / 100.0f);
 
         sprintf(package + strlen(package), ",\"2\":{\"command\":\"property.publish\",\"params\":{"
 							"\"thingKey\":\"%s\","
 							"\"key\": \"%s\","
 							"\"value\": \"%.2f\""
-							"}}", "beaglebone_test", "pressure" , data.pressure / 100.0f);
+							"}}", THING_KEY, "pressure" , data.pressure / 100.0f);
 
         sprintf(package + strlen(package), ",\"3\":{\"command\":\"property.publish\",\"params\":{"
 							"\"thingKey\":\"%s\","
 							"\"key\": \"%s\","
 							"\"value\": \"%.2f\""
-							"}}}", "beaglebone_test", "humidity" , data.humidity / 1000.0f);
+							"}}}", THING_KEY, "humidity" , data.humidity / 1000.0f);
         printf("String Length: %d", strlen(package));
 
 //        printf("%s", package);
@@ -168,7 +176,7 @@ void get_sensor_readings()
         if (gas_sensor.power_mode == BME680_FORCED_MODE) {
             rslt = bme680_set_sensor_mode(&gas_sensor);
         }
-        sleep(2);
+        sleep(60);
     }
 }
 
@@ -420,8 +428,9 @@ static void mqtt_app_start(void)
     esp_mqtt_client_config_t mqtt_cfg = {
         .uri = "mqtt://api-dev.devicewise.com/api",
         .event_handle = mqtt_event_handler,
-        .username = "waiyar.aung@meds-tech.com",
-        .password = "Meds_training1",
+        .username = THING_KEY,
+        .password = APP_TOKEN,
+		.client_id = APP_ID,
         // .user_context = (void *)your_context
     };
 
